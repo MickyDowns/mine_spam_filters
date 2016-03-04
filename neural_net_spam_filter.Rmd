@@ -1,0 +1,267 @@
+---
+title: "neural net: spam filter"
+output: html_document
+---
+
+### a
+```{r}
+library(gbm)
+library(caret)
+library(nnet)
+
+spam.train=read.csv("Spam_Train.txt",header=FALSE,sep=",",
+                  quote="\"",dec=".",fill=TRUE,comment.char="")
+
+#spam<-read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/spambase/spambase.data",sep=',')
+
+spam.test=read.csv("Spam.Test.txt",header=FALSE,sep=",",
+                  quote="\"",dec=".",fill=TRUE,comment.char="")
+
+rflabs<-c("make", "address", "all", "3d", "our", "over", "remove","internet",
+          "order", "mail", "receive", "will","people", "report", "addresses",
+          "free", "business","email", "you", "credit", "your", "font","000",
+          "money","hp", "hpl", "george", "650", "lab", "labs","telnet", "857", 
+          "data", "415", "85", "technology", "1999","parts","pm", "direct", 
+          "cs", "meeting", "original", "project","re","edu", "table", "conference",
+          ";", "(", "[", "!", "$", "#","CAPAVE", "CAPMAX", "CAPTOT","type")
+colnames(spam.train)<-rflabs;colnames(spam.test)<-rflabs
+
+# standardize predictors
+sum(is.na(spam.train))
+spam.train[,1:57]=scale(spam.train[,1:57])
+sum(is.na(spam.test))
+spam.test[,1:57]=scale(spam.test[,1:57])
+
+## randomize rows
+set.seed(131)
+x.train<-spam.train[sample(nrow(spam.train)),]
+x.test=spam.test[sample(nrow(spam.test)),]
+
+# routine for fitting scores
+scr.fit <-function(weight,prob,actuals,preds) {
+     # sum predictions by outcome
+     tp=sum((preds==1 & preds==actuals));tn=sum((preds==0 & preds==actuals))
+     fp=sum((preds==1 & preds!=actuals));fn=sum((preds==0 & preds!=actuals))
+     # calculate rates
+     fpr=fp/(fp+tn);fnr=fn/(fn+tp);miscl=(fp+fn)/(tp+tn+fp+fn)
+     # format results
+     result=as.data.frame(matrix(NA,1,6))
+     names(result)=c("weight","prob","fpr","fnr","miscl","scr")
+     result[1,1]=weight;result[1,2]=prob;result[1,3]=fpr;result[1,4]=fnr
+     result[1,5]=miscl;result[1,6]=((1-fpr)*weight+(1-fnr))/(weight+1)
+     return(result)
+}
+# routine for tabulating scrs
+scr.tab <-function(set,scr.det,nfolds) {
+     scr.mstr=scr.det[1:dim(set)[1],1:6]
+     scr.mstr[,7:10]=0
+     for(k in 1:nfolds){
+          scr.mstr[,7:10]=scr.mstr[,7:10]+
+               scr.det[((k-1)*dim(set)[1]+1):((k)*dim(set)[1]),7:10]
+     }
+     scr.mstr[,7:10]=(scr.mstr[,7:10])/nfolds
+     colnames(scr.mstr)=c("siz","dec","skp","cse_wt","scr_wt","prob",
+                          "fpr","fnr","miscl","scr")
+     return(scr.mstr)
+}
+
+# parameter set matrix
+set=as.data.frame(matrix(data=c(
+     1,0.5,1,0,FALSE,0,
+     1,0.5,2,0,FALSE,0,
+     1,0.5,3,0,FALSE,0,
+     1,0.5,4,0,FALSE,0,
+     1,0.5,5,0,FALSE,0,
+     1,0.5,6,0,FALSE,0,
+     1,0.5,7,0,FALSE,0,
+     1,0.5,8,0,FALSE,0,
+     1,0.5,9,0,FALSE,0,
+     1,0.5,10,0,FALSE,0
+     ),nrow=10,ncol=6,byrow=T),stringsAsFactors=F)
+for(i in c(5)){set[,i]=as.logical(set[,i])}
+names(set)<-c("wt","prob","siz","dec","skp","cse")
+
+## start parallel processing
+library(parallel); library(doParallel)
+registerDoParallel(clust <- makeForkCluster(detectCores()))
+
+# 10-fold cross validation
+rm(scr.mstr.nds,scr.det.nds)
+nfolds=10;inBuild=createFolds(y=x.train$type,k=nfolds,list=FALSE)
+
+for(j in 1:nfolds){
+     train=x.train[inBuild!=j,];test=x.train[inBuild==j,]
+     
+     # iterate through parameter sets
+     for(i in 1:dim(set)[1]){
+          # fit / predict
+          fit.nds<-nnet(as.factor(type)~.,data=train,size=set$siz[i],
+                        decay=set$dec[i],skip=set$skp[i],Hess=TRUE,
+                        rang=0.5,trace=TRUE,maxit=300,MaxNWts=2000)
+          # question: i'm using rang to set initial variable weights. is that right, or do i need to initialize thru Wts.
+     
+          preds<-predict(fit.nds,test,type="class")
+          
+          # score results
+          scr=scr.fit(set$wt[i],set$prob[i],test$type,preds)
+          scr=cbind(as.data.frame(set[i,3:6]),scr)
+          if(exists("scr.det.nds")){
+               scr.det.nds=rbind(scr.det.nds,scr)
+          }else{
+               scr.det.nds=scr
+          }
+          print(scr)
+     }
+}
+# tabulate results
+scr.mstr.nds=scr.tab(set,scr.det.nds,nfolds)
+
+# stop parallel processing
+stopCluster(clust)
+
+scr.mstr.nds=scr.mstr.nds[order(scr.mstr.nds$siz,decreasing=F),]
+# "best" model
+a=scr.mstr.nds[,c(9,7)];a=t(a)
+barplot(a,beside=T,legend.text=c("misclass error      ","false pos rate      "),
+        main="nnet errors by network size",
+        xlab="number of 'hidden' nodes",ylab="error rate")
+abline(h=a[2,6],col="red",lwd=2);abline(h=a[2,10],col="red",lwd=2)
+```
+### b
+```{r}
+# matrix of model parameters
+set=as.data.frame(matrix(data=c(
+     1,0.5,10,0,FALSE,0,
+     1,0.5,10,0.1,FALSE,0,
+     1,0.5,10,0.125,FALSE,0,
+     1,0.5,10,0.15,FALSE,0,
+     1,0.5,10,0.175,FALSE,0,
+     1,0.5,10,0.2,FALSE,0,
+     1,0.5,10,0.225,FALSE,0,
+     1,0.5,10,0.3,FALSE,0,
+     1,0.5,10,0.4,FALSE,0,
+     1,0.5,10,0.5,FALSE,0
+     ),nrow=10,ncol=6,byrow=T),stringsAsFactors=F)
+for(i in c(5)){set[,i]=as.logical(set[,i])}
+names(set)<-c("wt","prob","siz","dec","skp","cse")
+
+## start parallel processing
+library(parallel); library(doParallel)
+registerDoParallel(clust <- makeForkCluster(detectCores()))
+
+# 10-fold cross validation
+rm(scr.mstr.dec,scr.det.dec)
+
+for(j in 1:nfolds){     
+     for(i in 1:dim(set)[1]){
+          # fit / predict
+          fit.dec<-nnet(as.factor(type)~.,data=x.train,size=set$siz[i],
+                    decay=set$dec[i],skip=set$skp[i],Hess=TRUE,
+                    rang=0.5,trace=TRUE,maxit=300,MaxNWts=2000)
+     
+          preds<-predict(fit.dec,x.test,type="class")
+                    
+          # score results
+          scr=scr.fit(set$wt[i],set$prob[i],x.test$type,preds)
+          scr=cbind(as.data.frame(set[i,3:6]),scr)
+          if(exists("scr.det.dec")){
+               scr.det.dec=rbind(scr.det.dec,scr)
+          }else{
+               scr.det.dec=scr
+          }
+          print(scr)
+     }
+}
+# tabulate results
+scr.mstr.dec=scr.tab(set,scr.det.dec,nfolds)
+
+# stop parallel processing
+stopCluster(clust)
+
+# after iterations
+scr.mstr.dec=scr.mstr.dec[order(scr.mstr.dec$miscl,decreasing=F),]
+#a=rbind(scr.mstr.dec.bak,scr.mstr.dec);
+a=scr.mstr.dec[order(scr.mstr.dec$dec,decreasing=T),];a=a[order(a$siz,decreasing=T),]
+b=a[1:10,c(2,9,7)]
+c=a[11:20,c(2,9,7)]
+
+plot(b$dec,b$miscl,type="l",lwd=2,ylim=c(0.03,0.06),xlab="decay rate",
+     ylab="error rate",main="nnet errors by decay rate")
+lines(b$dec,b$fpr,lwd=2,lty=2)
+abline(v=a$dec[which.min(a$miscl)],col="red",lwd=2)
+legend("topright",cex=0.9, c("10-node misclass       ","10-node false pos       "),
+       col=c("black","black"),lty=c(1,2),lwd=2)
+```
+
+### c
+```{r}
+# matrix of model parameters
+set=as.data.frame(matrix(data=c(
+     1,0.85,10,0.30,FALSE,0,
+     1,0.875,10,0.30,FALSE,0,
+     1,0.90,10,0.30,FALSE,0,
+     1,0.925,10,0.30,FALSE,0,
+     1,0.95,10,0.30,FALSE,0,
+     1,0.975,10,0.30,FALSE,0
+     ),nrow=6,ncol=6,byrow=T),stringsAsFactors=F)
+for(i in c(5)){set[,i]=as.logical(set[,i])}
+names(set)<-c("wt","prob","siz","dec","skp","cse")
+
+## start parallel processing
+library(parallel); library(doParallel)
+registerDoParallel(clust <- makeForkCluster(detectCores()))
+
+# create cross-validation folds
+rm(scr.mstr.fpr,scr.det.fpr)
+nfolds=10;#inBuild=createFolds(y=x.train$type,k=nfolds,list=FALSE)
+
+for(j in 1:nfolds){
+     #train=x.train[inBuild!=j,];test=x.train[inBuild==j,]
+     train=x.train;test=x.test
+     
+     ## introduce case weights
+     case.wts=rep(0,dim(train)[1])
+     case.wts[train$type>0]=1+set$cse[i]
+     case.wts[train$type==0]=1-set$cse[i]
+     
+     for(i in 1:dim(set)[1]){
+          # fit / predict
+          fit.fpr<-nnet(as.factor(type)~.,data=train,size=set$siz[i],weights=case.wts,
+                    decay=set$dec[i],skip=set$skp[i],Hess=TRUE,
+                    rang=0.5,trace=TRUE,maxit=300,MaxNWts=2000)
+     
+          probs=predict(fit.fpr,test,type="raw")
+          preds=rep(0,length(probs))
+          preds[probs>set$prob[i]]=1
+                    
+          # score results
+          scr=scr.fit(set$wt[i],set$prob[i],test$type,preds)
+          scr=cbind(as.data.frame(set[i,3:6]),scr)
+          if(exists("scr.det.fpr")){
+               scr.det.fpr=rbind(scr.det.fpr,scr)
+          }else{
+               scr.det.fpr=scr
+          }
+          print(scr)
+     }
+}
+# tabulate results
+scr.mstr.fpr=scr.tab(set,scr.det.fpr,nfolds)
+
+# stop parallel processing
+stopCluster(clust)
+
+# data for graphics
+scr.mstr.fpr=scr.mstr.fpr[order(scr.mstr.fpr$fpr,decreasing=F),]
+d=scr.mstr.fpr[order(scr.mstr.fpr$cse_wt,decreasing=T),]
+
+# plot performance
+plot(d$prob,d$fpr,type="l",lwd=2,ylim=c(0.005,0.12),xlab="good email probability",
+     ylab="error rate",main="nnet errors by probability",col="black")
+lines(d$prob,d$miscl,lwd=2,lty=2,col="black")
+h=d[d$fpr<0.01,]
+abline(v=h$prob[which.min(h$miscl)],col="red",lwd=2)
+legend("topleft",cex=0.9, c("10-node/0.3 decay false pos",
+                            "10-node/0.3 decay misclass               "),
+       col=c("black","black"),lty=c(1,2),lwd=2)
+```
